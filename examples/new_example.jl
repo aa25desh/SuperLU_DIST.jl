@@ -2,16 +2,15 @@ using MPI
 using SuperLU_DIST
 #main(int argc, char *argv[]) llel for julia
 const LSLU = SuperLU_DIST.Libsuperlu_dist
-
-options = superlu_dist_options_t()
-stat = SuperLUStat_t()
-A = SuperMatrix()
-ScalePermstruct = dScalePermstruct_t()
-LUstruct = dLUstruct_t()
 gridref = Ref{gridinfo_t}()
 #C_NULL or something else?
-m,n,a,nnz,asub,xa = Ref{Int64}(), Ref{Int64}(), Ref{Ptr{Float64}}(), Ref{Int64}(), Ref{Ptr{Int64}}(), Ref{Ptr{Int64}}()
-
+m,n,a,nnz,asub,xa = 
+Ref{Int64}(), 
+Ref{Int64}(), 
+Ref{Ptr{Float64}}(), 
+Ref{Int64}(), 
+Ref{Ptr{Int64}}(), 
+Ref{Ptr{Int64}}()
 info = C_NULL
 
 """
@@ -39,12 +38,14 @@ MPI.Init()
 # How to pass the nprow and npcol? lets have them fixed value now
 nprow = 1
 npcol = 1
+nrhs = 1
 #Let have fixed file name for now! we will chage it later
-fp = open("g20.rua", "r")
-
+fp = open("examples/g20.rua", "r")
+println(MPI.COMM_WORLD)
 superlu_gridinit(MPI.COMM_WORLD, nprow, npcol, gridref)
-print(gridref[])
-exit()
+grid = gridref[]
+println(grid.comm)
+# exit()
 
 
 
@@ -53,6 +54,7 @@ iam = grid.iam
 if iam == -1 
     LSLU.superlu_gridexit(Ref(grid))
     MPI.Finalize()
+    exit()
 end
 
 print("\n")
@@ -64,13 +66,8 @@ print("\n")
 print("FILE ptr")
 
 
-#LSLU.dreadhb_dist(iam, fpp, m, n, nnz, a, asub, xa)
+# LSLU.dreadhb_dist(iam, fpp, m, n, nnz, a, asub, xa)
 #MPI.Finalize()
-
-#grid.comm = MPI.COMM_WORLD
-
-print("\n")
-print("gird.coom")
 
 if iam == 0
     # dreadhb_dist(int iam, FILE *fp, int_t *nrow, int_t *ncol, int_t *nonz, double **nzval, int_t **rowind, int_t **colptr)
@@ -85,30 +82,87 @@ if iam == 0
     #MPI.Finalize()
     #Bcast vs Bcast! c ver MPI_Bcast( &m,   1,   mpi_int_t,  0, grid.comm );
     # MPI_Bcast(void *buffer, int count, MPI_Datatype datatype, int root, MPI_Comm comm)
-    MPI.Bcast!(m, 0, grid.comm) # Julia Bcast!(buf, root::Integer, comm::Comm)
     # I am leaving out count and  MPI_datatype hope MPI.jl handels it:)
     print("\n")
     print(m[])
-	MPI.Bcast!(n, 0, grid.comm)
-	MPI.Bcast!(Ref(nnz), 0, grid.comm)
-	MPI.Bcast!(Ref(a), 0, grid.comm)
-	MPI.Bcast!(Ref(asub), 0, grid.comm)
-	MPI.Bcast!(Ref(xa), 0, grid.comm)
+    a = unsafe_wrap(Array, a[], nnz[])
+    asub = unsafe_wrap(Array, asub[], nnz[])
+    xa = unsafe_wrap(Array, xa[], n[] + 1)
+    MPI.Bcast!(m, 0, MPI.Comm(grid.comm))
+    print(m[])
+	MPI.Bcast!(n, 0, MPI.Comm(grid.comm))
+	MPI.Bcast!(nnz, 0, MPI.Comm(grid.comm))
+	MPI.Bcast!(a, 0, MPI.Comm(grid.comm))
+	MPI.Bcast!(asub, 0, MPI.Comm(grid.comm))
+	MPI.Bcast!(xa, 0, MPI.Comm(grid.comm))
 else 
-    MPI.Bcast!(m, 0, MPI.COMM_WORLD) 
-    print("\n")
-    print("Bacst")
-	MPI.Bcast!(Ref(n), 0, grid.comm)
-	MPI.Bcast!(Ref(nnz), 0, grid.comm)
+    MPI.Bcast!(m, 0, MPI.Comm(grid.comm))
+    print(m[]) 
+	MPI.Bcast!(n, 0, MPI.Comm(grid.comm))
+	MPI.Bcast!(nnz, 0, MPI.Comm(grid.comm))
 
-    LSLU.dallocateA_dist(n, nnz, Ref(a), Ref(asub), Ref(xa));
-
-	MPI.Bcast!(Ref(a), 0, grid.comm)
-	MPI.Bcast!(Ref(asub), 0, grid.comm)
-	MPI.Bcast!(Ref(xa), 0, grid.comm)
+    LSLU.dallocateA_dist(n[], nnz[], a, asub, xa);
+    a = unsafe_wrap(Array, a[], nnz[])
+    asub = unsafe_wrap(Array, asub[], nnz[])
+    xa = unsafe_wrap(Array, xa[], n[] + 1)
+	MPI.Bcast!(a, 0, MPI.Comm(grid.comm))
+	MPI.Bcast!(asub, 0, MPI.Comm(grid.comm))
+	MPI.Bcast!(xa, 0, MPI.Comm(grid.comm))
 end
 
-print("#####")
+A = Ref{LSLU.SuperMatrix}()
+m = m[]
+n = n[]
+nnz = nnz[]
+LSLU.dCreate_CompCol_Matrix_dist(
+    A, m, n, nnz, a, asub, xa, LSLU.SLU_NC, LSLU.SLU_D, LSLU.SLU_GE
+)
+
+if iam == 0
+    LSLU.dPrint_CompCol_Matrix_dist(A)
+end
+println("After dcreate")
+
+b = LSLU.doubleMalloc_dist(m * nrhs)
+xtrue = LSLU.doubleMalloc_dist(n * nrhs)
+
+trans = Ref(Cchar('N'))
+ldx = n
+ldb = m
+LSLU.dGenXtrue_dist(n, nrhs, xtrue, ldx)
+println("Finished dGenXtrue")
+LSLU.dFillRHS_dist(trans, nrhs, xtrue, ldx, A, b, ldb)
+
+berr = LSLU.doubleMalloc_dist(nrhs)
+
+options = Ref{LSLU.superlu_dist_options_t}()
+LSLU.set_default_options_dist(options)
+if iam == 0
+    LSLU.print_options_dist(options)
+end
+ScalePermstruct = Ref{LSLU.dScalePermstruct_t}()
+LUstruct = Ref{dLUstruct_t}()
+
+LSLU.dScalePermstructInit(m, n, ScalePermstruct)
+LSLU.dLUstructInit(n, LUstruct)
+println("Init'd")
+
+stat = Ref{LSLU.SuperLUStat_t}()
+LSLU.PStatInit(stat)
+
+gridref
+info = Ref{Cint}()
+println("About to pdg")
+LSLU.pdgssvx_ABglobal(options, A, ScalePermstruct, b, ldb, nrhs,
+gridref, LUstruct, berr, stat, info)
+
+println("PDG'd")
+if iam == 0
+    dinf_norm_error_dist(n, nrhs, b, ldb, xtrue, ldx, gridref)
+end
+println("about to print")
+PStatPrint(options, stat, gridref)
+
 MPI.Finalize()
 #=
 """
@@ -124,8 +178,6 @@ https://github.com/xiaoyeli/superlu_dist/blob/ac353e46cdf817b9738f679d4551efd879
 dCreate_CompCol_Matrix_dist(arg1::Ptr{SuperMatrix}, arg2::int_t,
 arg3::int_t, arg4::int_t, arg5::Ptr{Cdouble}, arg6::Ptr{int_t}, arg7::Ptr{int_t}, arg8::Stype_t, arg9::Dtype_t, arg10::Mtype_t)::Cvoid
 """
-LSLU.dCreate_CompCol_Matrix_dist(Ref(A), m, n, nnz, Ref(a), Ref(asub), Ref(xa), SLU_NC, SLU_D, SLU_GE);
-
 #if (!(b=doubleMalloc_dist(m*nrhs))) ABORT("Malloc fails for b[]")
 #if (!(xtrue=doubleMalloc_dist(n*nrhs))) ABORT("Malloc fails for xtrue[]")
 #libsuperlu_ddefs.doubleMalloc_dist(arg1::int_t)::Ptr{Cdouble}
